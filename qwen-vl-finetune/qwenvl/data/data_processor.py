@@ -1,3 +1,4 @@
+from io import BytesIO
 import json
 import random
 import logging
@@ -8,12 +9,15 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Sequence, List, Tuple, Any
 from collections.abc import Sequence
 from pathlib import Path
+from zipfile import ZipFile
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 import transformers
+from transformers.image_utils import load_image
+from PIL import Image
 
 from . import data_list
 from .rope2d import get_rope_index_25, get_rope_index_2, get_rope_index_3
@@ -137,7 +141,7 @@ def update_processor_pixels(processor, data_args):
     return processor
 
 
-def _build_messages(item: Dict[str, Any], base_path: Path) -> List[Dict[str, Any]]:
+def _build_messages(item: Dict[str, Any], base_path: Path, images_in_zip: bool=False) -> List[Dict[str, Any]]:
     # Extract and normalize images and videos
     images = item.get("image") or []
     if isinstance(images, str):
@@ -149,8 +153,9 @@ def _build_messages(item: Dict[str, Any], base_path: Path) -> List[Dict[str, Any
 
     # Build media pools with absolute paths
     image_pool = [
-        {"type": "image", "image": _make_abs_paths(base_path, img)} for img in images
+        {"type": "image", "image": img if images_in_zip else _make_abs_paths(base_path, img)} for img in images
     ]
+    # NOTE: don't support video in zip for now
     video_pool = [
         {"type": "video", "video": _make_abs_paths(base_path, vid)} for vid in videos
     ]
@@ -202,17 +207,37 @@ def _build_messages(item: Dict[str, Any], base_path: Path) -> List[Dict[str, Any
 def preprocess_qwen_visual(
     sources,
     processor,
+    images_zip_f: ZipFile = None,
 ) -> Dict:
     if len(sources) != 1:
         raise ValueError(f"Expected 1 source, got {len(sources)}")
 
     source = sources[0]
     base_path = Path(source.get("data_path", ""))
-    messages = _build_messages(source, base_path)
+    messages = _build_messages(source, base_path, images_in_zip=images_zip_f is not None)
 
-    full_result = processor.apply_chat_template(
-        messages, tokenize=True, return_dict=True, return_tensors="pt"
-    )
+    if images_zip_f:
+        text = processor.apply_chat_template(
+            messages, tokenize=False, return_dict=True, return_tensors="pt"
+        )
+        image_inputs = []
+        for image_path in source['image']:
+            # Read image bytes from the zip file
+            with images_zip_f.open(image_path, 'r') as img_f:
+                image_bytes = img_f.read()
+            image = Image.open(BytesIO(image_bytes)).copy()
+            image_obj = load_image(image)
+            image_inputs.append(image_obj)
+
+        full_result = processor(
+            text=text,
+            images=image_inputs,
+            return_tensors="pt",
+        )
+    else:
+        full_result = processor.apply_chat_template(
+            messages, tokenize=True, return_dict=True, return_tensors="pt"
+        )
 
     input_ids = full_result["input_ids"]
     if isinstance(input_ids, list):
@@ -246,6 +271,9 @@ class LazySupervisedDataset(Dataset):
 
     def __init__(self, processor, data_args):
         super(LazySupervisedDataset, self).__init__()
+        if data_args.images_in_zip:
+            self.datapath_zipf_inited = False
+            self.datapath_to_zipf = {} # dict from data_path to ZipFile object
 
         dataset = data_args.dataset_use.split(",")
         dataset_list = data_list(dataset)
@@ -282,6 +310,9 @@ class LazySupervisedDataset(Dataset):
                 rank0_print(f"sampling {len(annotations)} examples from dataset {data}")
             else:
                 rank0_print(f"dataset name: {data}")
+            if data_args.images_in_zip:
+                self.datapath_to_zipf[data["data_path"]] = None # need lazy init later
+
             for ann in annotations:
                 if isinstance(ann, list):
                     for sub_ann in ann:
@@ -343,7 +374,27 @@ class LazySupervisedDataset(Dataset):
             print("No pre-calculated length available.")
             return np.array([1] * len(self.list_data_dict))
 
+    def lazy_init_zipfiles(self):
+        if not self.datapath_zipf_inited:
+            for datapath in self.datapath_to_zipf:
+                zipf_path = Path(datapath)
+                print(f"lazy_init_zipfiles: opening zip file: {zipf_path}")
+                self.datapath_to_zipf[datapath] = ZipFile(zipf_path, 'r')
+            self.datapath_zipf_inited = True
+    
+    def __del__(self):
+        if hasattr(self, 'datapath_to_zipf') and self.datapath_to_zipf is not None:
+            for datapath, zipf in self.datapath_to_zipf.items():
+                if zipf is not None:
+                    print(f"Closing zip file: {datapath}")
+                    zipf.close()
+
+            self.datapath_to_zipf = None
+
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        if self.datapath_to_zipf is not None:
+            self.lazy_init_zipfiles()
+        
         num_base_retries = 3
         num_final_retries = 30
 
@@ -388,9 +439,16 @@ class LazySupervisedDataset(Dataset):
             raise e
 
     def _get_item(self, sources) -> Dict[str, torch.Tensor]:
+        images_zip_f = None
+        if self.datapath_to_zipf is not None:
+            if len(sources) != 1:
+                raise ValueError(f"Expected 1 source, got {len(sources)}")
+            images_zip_f = self.datapath_to_zipf[sources[0]['data_path']]
+        
         data_dict = preprocess_qwen_visual(
             sources,
             self.processor,
+            images_zip_f=images_zip_f,
         )
 
         seq_len = data_dict["input_ids"][0].size(0)
