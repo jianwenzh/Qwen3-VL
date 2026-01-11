@@ -12,6 +12,11 @@ class ModelArguments:
 
 @dataclass
 class DataArguments:
+    model_type: str = field(default="qwen3vl")
+    images_in_zip: bool = field(default=False)
+    annotation_path: str = field(default="")
+    data_path: str = field(default="")
+    sampling_rate: float = field(default=1.0)
     dataset_use: str = field(default="")
     data_flatten: bool = field(default=False)
     data_packing: bool = field(default=False)

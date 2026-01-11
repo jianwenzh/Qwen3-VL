@@ -100,7 +100,8 @@ def train(attn_implementation="flash_attention_2"):
     local_rank = training_args.local_rank
     os.makedirs(training_args.output_dir, exist_ok=True)
 
-    if "qwen3" in model_args.model_name_or_path.lower() and "a" in Path(model_args.model_name_or_path.rstrip("/")).name.lower():
+    # if "qwen3" in model_args.model_name_or_path.lower() and "a" in Path(model_args.model_name_or_path.rstrip("/")).name.lower():
+    if data_args.model_type == "qwen3vlmoe":
         model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -108,7 +109,8 @@ def train(attn_implementation="flash_attention_2"):
             dtype=(torch.bfloat16 if training_args.bf16 else None),
         )
         data_args.model_type = "qwen3vl"
-    elif "qwen3" in model_args.model_name_or_path.lower():
+    # elif "qwen3" in model_args.model_name_or_path.lower():
+    elif data_args.model_type == "qwen3vl":
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -116,7 +118,8 @@ def train(attn_implementation="flash_attention_2"):
             dtype=(torch.bfloat16 if training_args.bf16 else None),
         )
         data_args.model_type = "qwen3vl"
-    elif "qwen2.5" in model_args.model_name_or_path.lower():
+    # elif "qwen2.5" in model_args.model_name_or_path.lower():
+    elif data_args.model_type == "qwen2.5vl":
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -124,7 +127,8 @@ def train(attn_implementation="flash_attention_2"):
             dtype=(torch.bfloat16 if training_args.bf16 else None),
         )
         data_args.model_type = "qwen2.5vl"
-    else:
+    # else:
+    elif data_args.model_type == "qwen2vl":
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -132,6 +136,8 @@ def train(attn_implementation="flash_attention_2"):
             dtype=(torch.bfloat16 if training_args.bf16 else None),
         )
         data_args.model_type = "qwen2vl"
+    else:
+        raise NotImplementedError(f"Model type {data_args.model_type} not supported yet.")
 
     print(f'the initlized model is {model_args.model_name_or_path} the class is {model.__class__.__name__}')
     processor = AutoProcessor.from_pretrained(

@@ -19,7 +19,7 @@ import transformers
 from transformers.image_utils import load_image
 from PIL import Image
 
-from . import data_list
+from . import data_list, data_set_from_cmd
 from .rope2d import get_rope_index_25, get_rope_index_2, get_rope_index_3
 
 IGNORE_INDEX = -100
@@ -275,8 +275,15 @@ class LazySupervisedDataset(Dataset):
             self.datapath_zipf_inited = False
             self.datapath_to_zipf = {} # dict from data_path to ZipFile object
 
-        dataset = data_args.dataset_use.split(",")
-        dataset_list = data_list(dataset)
+        if data_args.annotation_path:
+            dataset_list = data_set_from_cmd(
+                data_args.annotation_path,
+                data_args.data_path,
+                data_args.sampling_rate,
+            )
+        else:
+            dataset = data_args.dataset_use.split(",")
+            dataset_list = data_list(dataset)
         rank0_print(f"Loading datasets: {dataset_list}")
         self.video_max_total_pixels = getattr(
             data_args, "video_max_total_pixels", 1664 * 28 * 28

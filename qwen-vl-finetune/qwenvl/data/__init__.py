@@ -55,6 +55,13 @@ def data_list(dataset_names):
             raise ValueError(f"do not find {dataset_name}")
     return config_list
 
+def data_set_from_cmd(annotation_path, data_path, sampling_rate=1.0):
+    config = {
+        "annotation_path": annotation_path,
+        "data_path": data_path,
+        "sampling_rate": sampling_rate,
+    }
+    return [config]
 
 if __name__ == "__main__":
     dataset_names = ["cambrian_737k"]
