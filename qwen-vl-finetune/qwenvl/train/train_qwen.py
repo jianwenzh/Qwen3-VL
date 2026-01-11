@@ -21,6 +21,8 @@ import torch
 import transformers
 import sys
 from pathlib import Path
+import signal
+import sys
 
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
@@ -208,5 +210,17 @@ def train(attn_implementation="flash_attention_2"):
     processor.save_pretrained(training_args.output_dir)
 
 
+def handler(sig, frame):
+    print("Caught SIGINT, exiting...")
+    try:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+    except Exception:
+        pass
+    sys.exit(0)
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)  # optional
     train(attn_implementation="flash_attention_2")
+    
