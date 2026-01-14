@@ -100,6 +100,11 @@ def train(attn_implementation="flash_attention_2"):
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     local_rank = training_args.local_rank
+
+    rank0_print("Model arguments:", model_args)
+    rank0_print("Data arguments:", data_args)
+    rank0_print("Training arguments:", training_args)
+
     os.makedirs(training_args.output_dir, exist_ok=True)
 
     # if "qwen3" in model_args.model_name_or_path.lower() and "a" in Path(model_args.model_name_or_path.rstrip("/")).name.lower():
@@ -196,10 +201,14 @@ def train(attn_implementation="flash_attention_2"):
         model=model, processing_class=tokenizer, args=training_args, **data_module
     )
 
-    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
+    resume_from_dir = model_args.resume_from_dir or training_args.output_dir
+    if list(pathlib.Path(resume_from_dir).glob("checkpoint-*")):
         logging.info("checkpoint found, resume training")
         trainer.train(resume_from_checkpoint=True)
     else:
+        if model_args.resume_from_dir is not None:
+            raise ValueError(f"model_args.resume_from_dir specified but no checkpoint found in {model_args.resume_from_dir}")
+        
         trainer.train()
     trainer.save_state()
 

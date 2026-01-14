@@ -6,6 +6,7 @@ from typing import Dict, Optional, Sequence, List
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="Qwen/Qwen2.5-VL-3B-Instruct")
+    resume_from_dir: Optional[str] = field(default=None) # default resume from output_dir, if not None, resume from this dir
     tune_mm_llm: bool = field(default=False)
     tune_mm_mlp: bool = field(default=False)
     tune_mm_vision: bool = field(default=False)
