@@ -34,6 +34,8 @@ class DataArguments:
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
     cache_dir: Optional[str] = field(default=None)
+    chunk_stop_steps: Optional[int] = field(default=None) # used for chunk training, stop steps for each chunk
+    callback_report_to: str|List[str] = field(default="csv") # default to csv
     optim: str = field(default="adamw_torch")
     model_max_length: int = field(
         default=512,

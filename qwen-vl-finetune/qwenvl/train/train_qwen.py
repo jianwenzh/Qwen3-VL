@@ -17,6 +17,8 @@
 import os
 import logging
 import pathlib
+from typing import List
+import mlflow
 import torch
 import transformers
 import sys
@@ -33,7 +35,8 @@ from transformers import (
     Qwen2VLForConditionalGeneration,
     Qwen2_5_VLForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
-    Qwen3VLMoeForConditionalGeneration
+    Qwen3VLMoeForConditionalGeneration,
+    TrainerCallback
 )
 from qwenvl.data.data_processor import make_supervised_data_module
 from qwenvl.train.argument import (
@@ -45,6 +48,50 @@ from transformers import AutoProcessor, Trainer
 
 local_rank = None
 
+class StopAtStepCallback(TrainerCallback):
+    def __init__(self, stop_step: int, should_save: bool = True):
+        self.stop_step = stop_step
+        self.should_save = should_save
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step >= self.stop_step:
+            control.should_training_stop = True
+            control.should_save = self.should_save
+            if state.is_local_process_zero:  # only log on main process
+                print(f"[StopAtStepCallback]: Set stopping training at step {state.global_step}")
+
+        return control
+
+_CSV_LOG_FILE_NAME = "metrics_log.txt"
+class CsvLogCallback(TrainerCallback):
+    """
+    Vanilla [`TrainerCallback`] that sends the logs to CSV file
+    """
+    def __init__(self, output_dir: str):
+        self.log_file_path = os.path.join(output_dir, _CSV_LOG_FILE_NAME)
+        with open(self.log_file_path, "a", encoding="utf-8") as fo:
+            fo.write("step,key,value\n")
+
+    def log_metric(self, key, value, step):
+        with open(self.log_file_path, "a", encoding="utf-8") as fo:
+            fo.write(f"{step},{key},{value}\n")
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if state.is_world_process_zero:
+            for k, v in logs.items():
+                if isinstance(v, (int, float)):
+                    self.log_metric(k, v, step=state.global_step)
+
+class AzureMLV2LogCallback(TrainerCallback):
+    """
+    A [`TrainerCallback`] that sends the logs to [AzureML via v2 SDK](https://learn.microsoft.com/en-us/azure/machine-learning/how-to-log-view-metrics?view=azureml-api-2&tabs=interactive)
+    """
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if state.is_world_process_zero:
+            for k, v in logs.items():
+                if isinstance(v, (int, float)):
+                    mlflow.log_metric(k, v, step=state.global_step)
 
 def rank0_print(*args):
     if local_rank == 0:
@@ -89,6 +136,25 @@ def set_model(model_args, model):
         for n, p in model.language_model.named_parameters():
             p.requires_grad = False
         model.lm_head.requires_grad = False
+
+
+def set_callbacks(training_args: TrainingArguments) -> List[TrainerCallback]:
+    callbacks = []
+    if training_args.callback_report_to is not None:
+        for rpt in training_args.callback_report_to:
+            if rpt == 'csv':
+                callbacks.append(CsvLogCallback(output_dir=training_args.output_dir))
+            elif rpt == 'azure_ml_v2':
+                callbacks.append(AzureMLV2LogCallback())
+            else:
+                raise ValueError(f"Unknown callback_report_to: {rpt}")
+    
+    if training_args.chunk_stop_steps is not None:
+        callbacks.append(StopAtStepCallback(stop_step=training_args.chunk_stop_steps, should_save=True))
+    
+    if len(callbacks) == 0:
+        callbacks = None
+    return callbacks
 
 
 def train(attn_implementation="flash_attention_2"):
@@ -197,8 +263,10 @@ def train(attn_implementation="flash_attention_2"):
             model.model.print_trainable_parameters()
     
     data_module = make_supervised_data_module(processor, data_args=data_args)
+    callbacks = set_callbacks(training_args)
+    rank0_print(f"Using callbacks: {callbacks}")
     trainer = Trainer(
-        model=model, processing_class=tokenizer, args=training_args, **data_module
+        model=model, processing_class=tokenizer, args=training_args, callbacks=callbacks, **data_module
     )
 
     resume_from_dir = model_args.resume_from_dir or training_args.output_dir
