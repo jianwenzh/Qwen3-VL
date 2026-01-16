@@ -385,7 +385,7 @@ class LazySupervisedDataset(Dataset):
         if not self.datapath_zipf_inited:
             for datapath in self.datapath_to_zipf:
                 zipf_path = Path(datapath)
-                print(f"lazy_init_zipfiles: opening zip file: {zipf_path}")
+                # print(f"lazy_init_zipfiles: opening zip file: {zipf_path}")
                 self.datapath_to_zipf[datapath] = ZipFile(zipf_path, 'r')
             self.datapath_zipf_inited = True
     

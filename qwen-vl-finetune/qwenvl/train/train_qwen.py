@@ -30,6 +30,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
 
 from trainer import replace_qwen2_vl_attention_class
+from transformers.trainer_utils import get_last_checkpoint
 
 from transformers import (
     Qwen2VLForConditionalGeneration,
@@ -269,15 +270,24 @@ def train(attn_implementation="flash_attention_2"):
         model=model, processing_class=tokenizer, args=training_args, callbacks=callbacks, **data_module
     )
 
-    resume_from_dir = model_args.resume_from_dir or training_args.output_dir
-    if list(pathlib.Path(resume_from_dir).glob("checkpoint-*")):
-        logging.info("checkpoint found, resume training")
-        trainer.train(resume_from_checkpoint=True)
-    else:
-        if model_args.resume_from_dir is not None:
-            raise ValueError(f"model_args.resume_from_dir specified but no checkpoint found in {model_args.resume_from_dir}")
+    
+    if model_args.resume_from_other_train_output_dir is not None:
+        if not os.path.exists(model_args.resume_from_other_train_output_dir) or not os.path.isdir(model_args.resume_from_other_train_output_dir):
+            raise ValueError(f"model_args.resume_from_other_train_output_dir {model_args.resume_from_other_train_output_dir} does not exist or is not a directory")
         
+        resume_from_checkpoint = get_last_checkpoint(model_args.resume_from_other_train_output_dir)
+        if resume_from_checkpoint is None:
+            raise ValueError(f"No valid checkpoint found in specified resume_from_other_train_output_dir directory ({model_args.resume_from_other_train_output_dir})")
+        
+        logging.info(f"Resuming training from checkpoint: {resume_from_checkpoint}")
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+
+    elif training_args.output_dir and list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
+        logging.info("checkpoint found from output_dir, resume training")
+        trainer.train(resume_from_checkpoint=True)
+    else:        
         trainer.train()
+    
     trainer.save_state()
 
     model.config.use_cache = True
