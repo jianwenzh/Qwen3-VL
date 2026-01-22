@@ -249,10 +249,10 @@ def preprocess_qwen_visual(
     L = len(input_ids_flat)
     pos = 0
     while pos < L:
-        if input_ids_flat[pos] == 77091:
+        if input_ids_flat[pos] == 77091: # 'assistant' # actually there is high risk that there is such normal word inside text
             ans_start = pos + 2
             ans_end = ans_start
-            while ans_end < L and input_ids_flat[ans_end] != 151645:
+            while ans_end < L and input_ids_flat[ans_end] != 151645: # <|im_end|>
                 ans_end += 1
             if ans_end < L:
                 labels[0, ans_start : ans_end + 2] = input_ids[
@@ -403,7 +403,7 @@ class LazySupervisedDataset(Dataset):
             self.lazy_init_zipfiles()
         
         num_base_retries = 3
-        num_final_retries = 30
+        # num_final_retries = 30
 
         # try the current sample first
         for attempt_idx in range(num_base_retries):
@@ -492,16 +492,18 @@ class LazySupervisedDataset(Dataset):
         data_dict["position_ids"] = position_ids
         data_dict["attention_mask"] = [seq_len]
 
-        text = self.processor.tokenizer.decode(
-            data_dict["input_ids"][0], skip_special_tokens=False
-        )
+        # not used at all, commented it out
+        # text = self.processor.tokenizer.decode(
+        #     data_dict["input_ids"][0], skip_special_tokens=False
+        # )
 
         labels = data_dict["labels"][0]
         labels = [
             tid if tid != -100 else self.processor.tokenizer.pad_token_id
             for tid in labels
         ]
-        label = self.processor.tokenizer.decode(labels, skip_special_tokens=False)
+        # not used at all, commented it out
+        # label = self.processor.tokenizer.decode(labels, skip_special_tokens=False)
 
         return data_dict
 
