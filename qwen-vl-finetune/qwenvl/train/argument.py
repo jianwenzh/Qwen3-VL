@@ -54,6 +54,11 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_r: int = field(default=64)
     lora_alpha: int = field(default=128)
     lora_dropout: float = field(default=0.0)
+    lora_target_modules: str = field(default="q_proj,k_proj,v_proj") # Other popular choices: "q_proj,k_proj,v_proj,gate_proj,up_proj,down_proj,o_proj"
+
+    ## for debug
+    print_model: Optional[bool] = False
+    print_trainable_params: Optional[bool] = False # for lora
 
     def __post_init__(self):
         # transformers.TrainingArguments has its own __post_init__, so we need to call it
@@ -61,3 +66,5 @@ class TrainingArguments(transformers.TrainingArguments):
         if self.min_lr is not None:
             self.lr_scheduler_kwargs = self.lr_scheduler_kwargs or {}
             self.lr_scheduler_kwargs["min_lr"] = self.min_lr
+        if self.lora_enable and self.lora_target_modules:
+            self.lora_target_modules = [x.strip() for x in self.lora_target_modules.split(",")]

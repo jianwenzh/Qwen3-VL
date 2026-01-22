@@ -114,6 +114,11 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
 
 
+def print_trainable_param_names(model):
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name, param.shape)
+
 def set_model(model_args, model):
     if model_args.tune_mm_vision:
         for n, p in model.visual.named_parameters():
@@ -218,6 +223,9 @@ def train(attn_implementation="flash_attention_2"):
         model_args.model_name_or_path,
     )
 
+    if training_args.print_model:
+        print(model)
+    
     if data_args.data_flatten or data_args.data_packing:
         replace_qwen2_vl_attention_class()
     model.config.use_cache = False
@@ -251,18 +259,21 @@ def train(attn_implementation="flash_attention_2"):
             r=training_args.lora_r or 64,
             lora_alpha=training_args.lora_alpha or 128,
             lora_dropout=training_args.lora_dropout or 0.05,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],  # Qwen 的 attention 线性层
+            target_modules=training_args.lora_target_modules, # Qwen 的 attention 线性层
             bias="none",
             task_type=TaskType.CAUSAL_LM,
         )
         model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+        if training_args.print_trainable_params:
+            print_trainable_param_names(model)
     else:
         set_model(model_args, model)
 
         if torch.distributed.get_rank() == 0:
             model.visual.print_trainable_parameters()
             model.model.print_trainable_parameters()
-    
+
     data_module = make_supervised_data_module(processor, data_args=data_args)
     callbacks = set_callbacks(training_args)
     rank0_print(f"Using callbacks: {callbacks}")
