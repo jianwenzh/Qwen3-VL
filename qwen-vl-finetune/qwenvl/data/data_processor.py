@@ -579,11 +579,11 @@ class LazySupervisedDataset(Dataset):
         #     data_dict["input_ids"][0], skip_special_tokens=False
         # )
 
-        labels = data_dict["labels"][0]
-        labels = [
-            tid if tid != -100 else self.processor.tokenizer.pad_token_id
-            for tid in labels
-        ]
+        # labels = data_dict["labels"][0]
+        # labels = [
+        #     tid if tid != -100 else self.processor.tokenizer.pad_token_id
+        #     for tid in labels
+        # ]
         # not used at all, commented it out
         # label = self.processor.tokenizer.decode(labels, skip_special_tokens=False)
 
