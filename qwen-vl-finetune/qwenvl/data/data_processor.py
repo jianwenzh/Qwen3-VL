@@ -1,5 +1,7 @@
+from glob import glob
 from io import BytesIO
 import json
+import os
 import random
 import logging
 import re
@@ -265,6 +267,83 @@ def preprocess_qwen_visual(
     full_result["input_ids"] = input_ids
     return full_result
 
+def glob_files_via_path_regex(dir: str, path_regex: str) -> List[str]:
+    files = glob.glob(os.path.join(dir, '**/*'), recursive=True)
+    files = [f for f in files if os.path.isfile(f)]
+    # used for post-filtering files based on regex pattern
+    if path_regex is not None:
+        regex = re.compile(path_regex)
+        files = [f for f in files if regex.search(f)]
+    return sorted(files)
+
+# config yml file
+# All paths must use absolute paths
+# -
+#  annotations_dir: "path/to/annotations_dir"
+#  images_dir: "path/to/images_dir
+#  path_regex: ".*\.jsonl$" # assuming the annotation files and image zip files share the same relative path inside their dirs exept for extension
+#  annotation_path: "path/to/annotations.jsonl" # optional, if specified, use this single file
+#  data_path: "path/to/images.zip" # optional, if specified, use this single file
+#  sampling_rate: 1.0 # sampling rate apply to this whole dataset (annotations)
+# -
+#  <dataset 2>
+#
+# after loading, returning the standard dataset list
+# -
+#   annotation_path: "path/to/annotation_file.jsonl"
+#   data_path: "path/to/images_zip_file.zip"
+#   sampling_rate: 1.0
+# -
+#  <dataset(subset) 2>
+#
+# Note, each original dataset may be expanded to multiple subsets, e.g., original dataset has partitions
+
+def load_zipdatamix(config_yml_file: str)-> List[Dict[str, Any]]: # return datalist
+    # load yaml
+    import yaml
+    with open(config_yml_file, "r") as f:
+        datamix_config = yaml.safe_load(f)
+    
+    if not isinstance(datamix_config, list):
+        raise ValueError("datamix_config should be a list of dataset configs")
+    
+    rank0_print(f"Found {len(datamix_config)} datasets in datamix config {config_yml_file}")
+    datalist = []
+    for dataset_idx, dataset_def in enumerate(datamix_config):
+        annotation_path = dataset_def.get("annotation_path", None)
+        data_path = dataset_def.get("data_path", None)
+        sampling_rate = dataset_def.get("sampling_rate", 1.0)
+        if annotation_path is not None and data_path is not None:
+            # single file dataset
+            datalist.append(
+                {
+                    "annotation_path": annotation_path,
+                    "data_path": data_path,
+                    "sampling_rate": sampling_rate,
+                }
+            )
+        elif not (annotation_path is None and data_path is None):
+            raise ValueError("Both annotation_path and data_path should be specified for single file dataset")
+        else:
+            # directory dataset
+            annotations_dir = dataset_def["annotations_dir"]
+            images_dir = dataset_def["images_dir"]
+            path_regex = dataset_def.get("path_regex", r".*\.jsonl$")
+            annotation_file_paths = glob_files_via_path_regex(annotations_dir, path_regex)
+            for annotation_file_path in annotation_file_paths:
+                relative_path = os.path.relpath(annotation_file_path, annotations_dir)
+                image_zip_file = os.path.join(images_dir, relative_path).replace('.jsonl', '.zip')
+                datalist.append(
+                    {
+                        "annotation_path": annotation_file_path,
+                        "data_path": image_zip_file,
+                        "sampling_rate": sampling_rate,
+                    }
+                )
+            rank0_print(f"Dataset {dataset_idx}: Found {len(annotation_file_paths)} annotation / zip files from {annotations_dir}")
+
+    rank0_print(f"Total loaded datasets: {len(datalist)}")
+    return datalist
 
 class LazySupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
@@ -275,7 +354,9 @@ class LazySupervisedDataset(Dataset):
             self.datapath_zipf_inited = False
             self.datapath_to_zipf = {} # dict from data_path to ZipFile object
 
-        if data_args.annotation_path:
+        if data_args.datamix_config_yml:
+            dataset_list = load_zipdatamix(data_args.datamix_config_yml)
+        elif data_args.annotation_path:
             dataset_list = data_set_from_cmd(
                 data_args.annotation_path,
                 data_args.data_path,

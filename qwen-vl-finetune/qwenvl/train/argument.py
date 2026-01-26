@@ -15,6 +15,7 @@ class ModelArguments:
 class DataArguments:
     model_type: str = field(default="qwen3vl")
     images_in_zip: bool = field(default=False)
+    datamix_config_yml: str = field(default="")
     annotation_path: str = field(default="")
     data_path: str = field(default="")
     sampling_rate: float = field(default=1.0)
