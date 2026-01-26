@@ -1,4 +1,4 @@
-from glob import glob
+import glob
 from io import BytesIO
 import json
 import os
@@ -23,19 +23,13 @@ from PIL import Image
 
 from . import data_list, data_set_from_cmd
 from .rope2d import get_rope_index_25, get_rope_index_2, get_rope_index_3
+from ..common.state import rank0_print
 
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = 151655
 VIDEO_TOKEN_INDEX = 151656
 DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_VIDEO_TOKEN = "<video>"
-
-local_rank = None
-
-
-def rank0_print(*args):
-    if local_rank == 0:
-        print(*args)
 
 
 def read_jsonl(path):
@@ -372,7 +366,7 @@ class LazySupervisedDataset(Dataset):
         else:
             dataset = data_args.dataset_use.split(",")
             dataset_list = data_list(dataset)
-        rank0_print(f"Loading datasets: {dataset_list}")
+        rank0_print(f"Loading {len(dataset_list)} datasets: {dataset_list}")
         self.video_max_total_pixels = getattr(
             data_args, "video_max_total_pixels", 1664 * 28 * 28
         )
@@ -466,7 +460,7 @@ class LazySupervisedDataset(Dataset):
             length_list = [sample["num_tokens"] for sample in self.list_data_dict]
             return np.array(length_list)
         else:
-            print("No pre-calculated length available.")
+            rank0_print("No pre-calculated length available.")
             return np.array([1] * len(self.list_data_dict))
 
     def lazy_init_zipfiles(self):
@@ -481,7 +475,7 @@ class LazySupervisedDataset(Dataset):
         if hasattr(self, 'datapath_to_zipf') and self.datapath_to_zipf is not None:
             for datapath, zipf in self.datapath_to_zipf.items():
                 if zipf is not None:
-                    print(f"Closing zip file: {datapath}")
+                    rank0_print(f"Closing zip file: {datapath}")
                     zipf.close()
 
             self.datapath_to_zipf = None
@@ -503,7 +497,7 @@ class LazySupervisedDataset(Dataset):
                 return sample
             except Exception as e:
                 # sleep 1s in case it is a cloud disk issue
-                print(f"[Try #{attempt_idx}] Failed to fetch sample {i}. Exception:", e)
+                rank0_print(f"[Try #{attempt_idx}] Failed to fetch sample {i}. Exception:", e)
                 time.sleep(1)
 
         # try other samples, in case it is file corruption issue
@@ -518,7 +512,7 @@ class LazySupervisedDataset(Dataset):
                 return sample
             except Exception as e:
                 # no need to sleep
-                print(
+                rank0_print(
                     f"[Try other #{attempt_idx}] Failed to fetch sample {next_index}. Exception:",
                     e,
                 )

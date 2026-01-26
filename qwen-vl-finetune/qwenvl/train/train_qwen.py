@@ -46,8 +46,7 @@ from qwenvl.train.argument import (
     TrainingArguments,
 )
 from transformers import AutoProcessor, Trainer
-
-local_rank = None
+from ..common.state import rank0_print, set_local_rank
 
 class StopAtStepCallback(TrainerCallback):
     def __init__(self, stop_step: int, should_save: bool = True):
@@ -59,7 +58,7 @@ class StopAtStepCallback(TrainerCallback):
             control.should_training_stop = True
             control.should_save = self.should_save
             if state.is_local_process_zero:  # only log on main process
-                print(f"[StopAtStepCallback]: Set stopping training at step {state.global_step}")
+                rank0_print(f"[StopAtStepCallback]: Set stopping training at step {state.global_step}")
 
         return control
 
@@ -94,10 +93,6 @@ class AzureMLV2LogCallback(TrainerCallback):
                 if isinstance(v, (int, float)):
                     mlflow.log_metric(k, v, step=state.global_step)
 
-def rank0_print(*args):
-    if local_rank == 0:
-        print(*args)
-
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
     """Collects the state dict and dump to disk."""
@@ -117,7 +112,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
 def print_trainable_param_names(model):
     for name, param in model.named_parameters():
         if param.requires_grad:
-            print(name, param.shape)
+            rank0_print(name, param.shape)
 
 def set_model(model_args, model):
     if model_args.tune_mm_vision:
@@ -164,14 +159,13 @@ def set_callbacks(training_args: TrainingArguments) -> List[TrainerCallback]:
 
 
 def train(attn_implementation="flash_attention_2"):
-    global local_rank
-
+    
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments)
     )
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    local_rank = training_args.local_rank
+    set_local_rank(training_args.local_rank)
 
     rank0_print("Model arguments:", model_args)
     rank0_print("Data arguments:", data_args)
@@ -218,13 +212,13 @@ def train(attn_implementation="flash_attention_2"):
     else:
         raise NotImplementedError(f"Model type {data_args.model_type} not supported yet.")
 
-    print(f'the initlized model is {model_args.model_name_or_path} the class is {model.__class__.__name__}')
+    rank0_print(f'the initlized model is {model_args.model_name_or_path} the class is {model.__class__.__name__}')
     processor = AutoProcessor.from_pretrained(
         model_args.model_name_or_path,
     )
 
     if training_args.print_model:
-        print(model)
+        rank0_print(model)
     
     if data_args.data_flatten or data_args.data_packing:
         replace_qwen2_vl_attention_class()
@@ -250,7 +244,7 @@ def train(attn_implementation="flash_attention_2"):
 
     if training_args.lora_enable:
         from peft import LoraConfig, get_peft_model, TaskType
-        print("LoRA enabled")
+        rank0_print("LoRA enabled")
 
         for p in model.parameters():
             p.requires_grad = False
