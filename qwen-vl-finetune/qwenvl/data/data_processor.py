@@ -206,6 +206,25 @@ def _build_messages(item: Dict[str, Any], base_path: Path, images_in_zip: bool=F
     return messages
 
 
+def load_image_obj_in_messages(messages: List[Dict[str, Any]], images_zip_f: ZipFile) -> List[Dict[str, Any]]:
+    for message in messages:
+        for content_item in message['content']:
+            if content_item['type'] == 'image':
+                image_path = content_item.get('image', None) or content_item.get('path', None) or content_item.get('url', None)
+                if image_path is None:
+                    raise ValueError("Image content item does not have 'image', 'path' or 'url' field")
+                
+                # Read image bytes from the zip file
+                with images_zip_f.open(image_path, 'r') as img_f:
+                    image_bytes = img_f.read()
+                image = Image.open(BytesIO(image_bytes)).copy()
+                image_obj = load_image(image)
+                content_item.pop('path', None)
+                content_item.pop('url', None)
+                content_item.pop('image', None)
+                content_item['image'] = image_obj
+    return messages
+
 def preprocess_qwen_visual(
     sources,
     processor,
@@ -216,30 +235,18 @@ def preprocess_qwen_visual(
 
     source = sources[0]
     base_path = Path(source.get("data_path", ""))
-    messages = _build_messages(source, base_path, images_in_zip=images_zip_f is not None)
+    # chatml format: if "messages" in source, directly use it
+    messages = source.get("messages", None)
+    # sharegpt format: build messages from conversations
+    if messages is None:
+        messages = _build_messages(source, base_path, images_in_zip=images_zip_f is not None)
 
     if images_zip_f:
-        text = processor.apply_chat_template(
-            messages, tokenize=False, return_dict=True, return_tensors="pt"
-        )
-        image_inputs = []
-        for image_path in source['image']:
-            # Read image bytes from the zip file
-            with images_zip_f.open(image_path, 'r') as img_f:
-                image_bytes = img_f.read()
-            image = Image.open(BytesIO(image_bytes)).copy()
-            image_obj = load_image(image)
-            image_inputs.append(image_obj)
-
-        full_result = processor(
-            text=text,
-            images=image_inputs,
-            return_tensors="pt",
-        )
-    else:
-        full_result = processor.apply_chat_template(
-            messages, tokenize=True, return_dict=True, return_tensors="pt"
-        )
+        load_image_obj_in_messages(messages, images_zip_f)
+    
+    full_result = processor.apply_chat_template(
+        messages, tokenize=True, return_dict=True, return_tensors="pt"
+    )
 
     input_ids = full_result["input_ids"]
     if isinstance(input_ids, list):
