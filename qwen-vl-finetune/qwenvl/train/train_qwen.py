@@ -46,7 +46,7 @@ from qwenvl.train.argument import (
     TrainingArguments,
 )
 from transformers import AutoProcessor, Trainer
-from ..common.state import rank0_print, set_local_rank
+from qwenvl.common.state import rank0_print, set_local_rank
 
 class StopAtStepCallback(TrainerCallback):
     def __init__(self, stop_step: int, should_save: bool = True):

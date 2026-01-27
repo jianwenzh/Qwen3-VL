@@ -5,6 +5,7 @@ import os
 import random
 import logging
 import re
+import sys
 import time
 import itertools
 from dataclasses import dataclass, field
@@ -21,9 +22,12 @@ import transformers
 from transformers.image_utils import load_image
 from PIL import Image
 
+project_root = Path(__file__).parent.parent.parent
+sys.path.append(str(project_root))
+
 from . import data_list, data_set_from_cmd
 from .rope2d import get_rope_index_25, get_rope_index_2, get_rope_index_3
-from ..common.state import rank0_print
+from qwenvl.common.state import rank0_print
 
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = 151655
