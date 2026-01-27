@@ -35,6 +35,7 @@ VIDEO_TOKEN_INDEX = 151656
 DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_VIDEO_TOKEN = "<video>"
 
+random.seed(42)
 
 def read_jsonl(path):
     with open(path, "r") as f:
@@ -303,7 +304,7 @@ def glob_files_via_path_regex(dir: str, path_regex: str) -> List[str]:
 #
 # Note, each original dataset may be expanded to multiple subsets, e.g., original dataset has partitions
 
-def load_zipdatamix(config_yml_file: str)-> List[Dict[str, Any]]: # return datalist
+def load_zipdatamix(config_yml_file: str, path_regex: str = None)-> List[Dict[str, Any]]: # return datalist
     # load yaml
     import yaml
     with open(config_yml_file, "r") as f:
@@ -313,6 +314,10 @@ def load_zipdatamix(config_yml_file: str)-> List[Dict[str, Any]]: # return datal
         raise ValueError("datamix_config should be a list of dataset configs")
     
     rank0_print(f"Found {len(datamix_config)} datasets in datamix config {config_yml_file}")
+
+    if path_regex:
+        rank0_print(f"Overriding path_regex in datamix config with: {path_regex}")
+    
     datalist = []
     for dataset_idx, dataset_def in enumerate(datamix_config):
         annotation_path = dataset_def.get("annotation_path", None)
@@ -333,7 +338,7 @@ def load_zipdatamix(config_yml_file: str)-> List[Dict[str, Any]]: # return datal
             # directory dataset
             annotations_dir = dataset_def["annotations_dir"]
             images_dir = dataset_def["images_dir"]
-            path_regex = dataset_def.get("path_regex", r".*\.jsonl$")
+            path_regex =  path_regex or dataset_def.get("path_regex", r".*\.jsonl$")
             annotation_file_paths = glob_files_via_path_regex(annotations_dir, path_regex)
             for annotation_file_path in annotation_file_paths:
                 relative_path = os.path.relpath(annotation_file_path, annotations_dir)
@@ -360,7 +365,7 @@ class LazySupervisedDataset(Dataset):
             self.datapath_to_zipf = {} # dict from data_path to ZipFile object
 
         if data_args.datamix_config_yml:
-            dataset_list = load_zipdatamix(data_args.datamix_config_yml)
+            dataset_list = load_zipdatamix(data_args.datamix_config_yml, data_args.datamix_path_regex)
         elif data_args.annotation_path:
             dataset_list = data_set_from_cmd(
                 data_args.annotation_path,
@@ -417,6 +422,16 @@ class LazySupervisedDataset(Dataset):
         rank0_print(f"Total training samples: {len(list_data_dict)}")
 
         random.shuffle(list_data_dict)  # Randomly shuffle the data for training
+        if data_args.train_set_size is not None and data_args.train_set_size > 0:
+            if data_args.train_set_size < len(list_data_dict):
+                rank0_print(f"train_set_size {data_args.train_set_size} is less than available samples {len(list_data_dict)}. Keep {data_args.train_set_size} samples.")
+                list_data_dict = list_data_dict[: data_args.train_set_size]
+            elif data_args.train_set_size > len(list_data_dict):
+                rank0_print(f"Warning: train_set_size {data_args.train_set_size} is larger than available samples {len(list_data_dict)}. Will repeat samples to fulfill the requirement.")
+                list_data_dict_cycle = itertools.cycle(list_data_dict)
+                list_data_dict = [next(list_data_dict_cycle) for _ in range(data_args.train_set_size)]
+            
+            rank0_print(f"After enforcing train_set_size, total training samples: {len(list_data_dict)}")
 
         rank0_print("Formatting inputs...Skip in lazy mode")
         processor = update_processor_pixels(processor, data_args)

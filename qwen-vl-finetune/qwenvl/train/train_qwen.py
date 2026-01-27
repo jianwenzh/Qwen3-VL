@@ -17,6 +17,7 @@
 import os
 import logging
 import pathlib
+import shutil
 from typing import List
 import mlflow
 import torch
@@ -57,10 +58,8 @@ class StopAtStepCallback(TrainerCallback):
         if state.global_step >= self.stop_step:
             control.should_training_stop = True
             control.should_save = self.should_save
-            if state.is_local_process_zero:  # only log on main process
-                rank0_print(f"[StopAtStepCallback]: Set stopping training at step {state.global_step}")
-
-        return control
+            if state.is_world_process_zero:  # only log on main process
+                print(f"[StopAtStepCallback]: Set stopping training at step {state.global_step}")
 
 _CSV_LOG_FILE_NAME = "metrics_log.txt"
 class CsvLogCallback(TrainerCallback):
@@ -68,19 +67,36 @@ class CsvLogCallback(TrainerCallback):
     Vanilla [`TrainerCallback`] that sends the logs to CSV file
     """
     def __init__(self, output_dir: str):
+        self.output_dir = output_dir
         self.log_file_path = os.path.join(output_dir, _CSV_LOG_FILE_NAME)
-        with open(self.log_file_path, "a", encoding="utf-8") as fo:
-            fo.write("step,key,value\n")
+        self._header_written = False
+
+    def _ensure_header(self):
+        if self._header_written:
+            return
+        
+        # consider the case the log file already exists, e.g., copied here before resuming
+        if not os.path.exists(self.log_file_path):
+            with open(self.log_file_path, "a", encoding="utf-8") as fo:
+                fo.write("step,key,value\n")
+        
+        self._header_written = True
 
     def log_metric(self, key, value, step):
         with open(self.log_file_path, "a", encoding="utf-8") as fo:
             fo.write(f"{step},{key},{value}\n")
 
     def on_log(self, args, state, control, logs=None, **kwargs):
-        if state.is_world_process_zero:
-            for k, v in logs.items():
-                if isinstance(v, (int, float)):
-                    self.log_metric(k, v, step=state.global_step)
+        if not state.is_world_process_zero:
+            return
+        if logs is None:
+            return
+        
+        os.makedirs(self.output_dir, exist_ok=True)
+        self._ensure_header()
+        for k, v in logs.items():
+            if isinstance(v, (int, float)):
+                self.log_metric(k, v, step=state.global_step)
 
 class AzureMLV2LogCallback(TrainerCallback):
     """
@@ -88,10 +104,52 @@ class AzureMLV2LogCallback(TrainerCallback):
     """
 
     def on_log(self, args, state, control, logs=None, **kwargs):
-        if state.is_world_process_zero:
-            for k, v in logs.items():
-                if isinstance(v, (int, float)):
-                    mlflow.log_metric(k, v, step=state.global_step)
+        if not state.is_world_process_zero:
+            return
+        if logs is None:
+            return
+        for k, v in logs.items():
+            if isinstance(v, (int, float)):
+                mlflow.log_metric(k, v, step=state.global_step)
+
+
+# callback to copy vision configs when saving checkpoints
+class CopyProcessorConfigCallback(TrainerCallback):
+    def __init__(self, input_model_dir: str):
+
+        self.input_model_dir = input_model_dir
+        self.files_to_copy = [
+            "preprocessor_config.json",
+            "video_preprocessor_config.json",
+        ]
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero:
+            return
+
+        if not os.path.isdir(self.input_model_dir):
+            raise ValueError(f"input_model_dir {self.input_model_dir} is invalid")
+
+        for f in self.files_to_copy:
+            path = os.path.join(self.input_model_dir, f)
+            if not os.path.exists(path):
+                raise ValueError(f"File {f} not found in {self.input_model_dir}")
+        
+    def on_save(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero:
+            return
+        
+        checkpoint_dir = kwargs.get("checkpoint_dir", None) or os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+        if not os.path.exists(checkpoint_dir):
+            print(f"Warning: checkpoint_dir {checkpoint_dir} does not exist, skip copying")
+            return
+        
+        for f in self.files_to_copy:
+            src = os.path.join(self.input_model_dir, f)
+            dst = os.path.join(checkpoint_dir, f)
+            if not os.path.exists(dst): # skip copying if already exists in dst
+                print(f"Copying {src} to {dst}")
+                shutil.copyfile(src, dst)
 
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
@@ -164,12 +222,25 @@ def train(attn_implementation="flash_attention_2"):
         (ModelArguments, DataArguments, TrainingArguments)
     )
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
     set_local_rank(training_args.local_rank)
 
     rank0_print("Model arguments:", model_args)
     rank0_print("Data arguments:", data_args)
     rank0_print("Training arguments:", training_args)
+
+    # validate args
+    if training_args.is_chunked_training:
+        if training_args.chunk_stop_steps is None:
+            raise ValueError("chunk_stop_steps must be set when is_chunked_training is True")
+        if data_args.train_set_size is None:
+            raise ValueError("data_args.train_set_size must be set when is_chunked_training is True.")
+        
+        rank0_print(f"This training is chunked training:")
+        rank0_print(f"  is_chunked_training: {training_args.is_chunked_training}")
+        rank0_print(f"  resume_from_other_train_output_dir: {training_args.resume_from_other_train_output_dir}")
+        rank0_print(f"  is_within_chunk_resume: {training_args.is_within_chunk_resume}")
+        rank0_print(f"  chunk_stop_steps: {training_args.chunk_stop_steps}")
+        rank0_print(f"  ignore_data_skip: {training_args.ignore_data_skip}")
 
     os.makedirs(training_args.output_dir, exist_ok=True)
 
@@ -276,14 +347,14 @@ def train(attn_implementation="flash_attention_2"):
         model=model, processing_class=tokenizer, args=training_args, callbacks=callbacks, **data_module
     )
 
-    
-    if model_args.resume_from_other_train_output_dir is not None:
-        if not os.path.exists(model_args.resume_from_other_train_output_dir) or not os.path.isdir(model_args.resume_from_other_train_output_dir):
-            raise ValueError(f"model_args.resume_from_other_train_output_dir {model_args.resume_from_other_train_output_dir} does not exist or is not a directory")
+    resume_from_other_train_output_dir = training_args.resume_from_other_train_output_dir
+    if resume_from_other_train_output_dir is not None:
+        if not os.path.exists(resume_from_other_train_output_dir) or not os.path.isdir(resume_from_other_train_output_dir):
+            raise ValueError(f"resume_from_other_train_output_dir {resume_from_other_train_output_dir} does not exist or is not a directory")
         
-        resume_from_checkpoint = get_last_checkpoint(model_args.resume_from_other_train_output_dir)
+        resume_from_checkpoint = get_last_checkpoint(resume_from_other_train_output_dir)
         if resume_from_checkpoint is None:
-            raise ValueError(f"No valid checkpoint found in specified resume_from_other_train_output_dir directory ({model_args.resume_from_other_train_output_dir})")
+            raise ValueError(f"No valid checkpoint found in specified resume_from_other_train_output_dir directory ({resume_from_other_train_output_dir})")
         
         logging.info(f"Resuming training from checkpoint: {resume_from_checkpoint}")
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
