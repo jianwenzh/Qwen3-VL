@@ -341,8 +341,16 @@ def load_zipdatamix(config_yml_file: str, path_regex: str = None)-> List[Dict[st
             # directory dataset
             annotations_dir = dataset_def["annotations_dir"]
             images_dir = dataset_def["images_dir"]
+            if not (os.path.exists(annotations_dir) and os.path.isdir(annotations_dir)):
+                raise ValueError(f"annotations_dir {annotations_dir} does not exist")
+            if not (os.path.exists(images_dir) and os.path.isdir(images_dir)):
+                raise ValueError(f"images_dir {images_dir} does not exist")
+
             path_regex =  path_regex or dataset_def.get("path_regex", r".*\.jsonl$")
             annotation_file_paths = glob_files_via_path_regex(annotations_dir, path_regex)
+            if len(annotation_file_paths) == 0:
+                raise ValueError(f"No annotation files found in {annotations_dir} with path_regex {path_regex}")
+
             for annotation_file_path in annotation_file_paths:
                 relative_path = os.path.relpath(annotation_file_path, annotations_dir)
                 image_zip_file = os.path.join(images_dir, relative_path).replace('.jsonl', '.zip')
