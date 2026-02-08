@@ -19,6 +19,7 @@ class DataArguments:
     annotation_path: str = field(default="")
     data_path: str = field(default="")
     sampling_rate: float = field(default=1.0)
+    no_shuffle: bool = field(default=False) # if set, do not shuffle the dataset, for controlled experiments
     train_set_size: Optional[int] = field(default=None) # if set, enforce exact number of training samples to load from dataset; for controlling correct resuming in chunked training
     dataset_use: str = field(default="")
     data_flatten: bool = field(default=False)

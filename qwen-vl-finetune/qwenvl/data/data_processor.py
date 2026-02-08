@@ -413,6 +413,9 @@ class LazySupervisedDataset(Dataset):
                 annotations = json.load(open(data["annotation_path"], "r"))
             sampling_rate = data.get("sampling_rate", 1.0)
             if sampling_rate < 1.0:
+                if data_args.no_shuffle:
+                    raise ValueError("no_shuffle is set, conflict with sampling_rate < 1.0")
+                
                 annotations = random.sample(
                     annotations, int(len(annotations) * sampling_rate)
                 )
@@ -432,7 +435,8 @@ class LazySupervisedDataset(Dataset):
 
         rank0_print(f"Total training samples: {len(list_data_dict)}")
 
-        random.shuffle(list_data_dict)  # Randomly shuffle the data for training
+        if not data_args.no_shuffle:
+            random.shuffle(list_data_dict)  # Randomly shuffle the data for training
         if data_args.train_set_size is not None and data_args.train_set_size > 0:
             if data_args.train_set_size < len(list_data_dict):
                 rank0_print(f"train_set_size {data_args.train_set_size} is less than available samples {len(list_data_dict)}. Keep {data_args.train_set_size} samples.")
@@ -441,6 +445,8 @@ class LazySupervisedDataset(Dataset):
                 rank0_print(f"Warning: train_set_size {data_args.train_set_size} is larger than available samples {len(list_data_dict)}. Will repeat samples to fulfill the requirement.")
                 list_data_dict_cycle = itertools.cycle(list_data_dict)
                 list_data_dict = [next(list_data_dict_cycle) for _ in range(data_args.train_set_size)]
+                if not data_args.no_shuffle:
+                    random.shuffle(list_data_dict)
             
             rank0_print(f"After enforcing train_set_size, total training samples: {len(list_data_dict)}")
 
