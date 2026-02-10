@@ -82,7 +82,9 @@ def process_file(
     images_zip_file_path = os.path.join(images_root_dir, relative_path.replace(".jsonl", ".zip"))
     remain_annotations_file = annotations_file_path
     if n_processed_lines > 0:
-        remain_annotations_file = "./remain_annotations.tmp.jsonl"
+        temp_dir = relative_path.replace(".jsonl", "") + f".tmp.{time.strftime('%Y%m%d-%H%M%S')}" # Note: should be unique for each process run
+        os.makedirs(temp_dir, exist_ok=True)
+        remain_annotations_file = os.path.join(temp_dir, "remain_annotations.tmp.jsonl")
         n_remain_lines = 0
         with open(annotations_file_path, "r", encoding="utf-8") as fin, open(remain_annotations_file, "w", encoding="utf-8") as fout:
             for i, line in enumerate(fin):
