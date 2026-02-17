@@ -1,22 +1,34 @@
+import copy
+import glob
+from io import BytesIO
 import json
+import os
 import random
 import logging
 import re
+import sys
 import time
 import itertools
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Sequence, List, Tuple, Any
 from collections.abc import Sequence
 from pathlib import Path
+from zipfile import ZipFile
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 import transformers
+from transformers.image_utils import load_image
+from PIL import Image
 
-from . import data_list
+project_root = Path(__file__).parent.parent.parent
+sys.path.append(str(project_root))
+
+from . import data_list, data_set_from_cmd
 from .rope2d import get_rope_index_25, get_rope_index_2, get_rope_index_3
+from qwenvl.common.state import rank0_print
 
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = 151655
@@ -24,13 +36,7 @@ VIDEO_TOKEN_INDEX = 151656
 DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_VIDEO_TOKEN = "<video>"
 
-local_rank = None
-
-
-def rank0_print(*args):
-    if local_rank == 0:
-        print(*args)
-
+random.seed(42)
 
 def read_jsonl(path):
     with open(path, "r") as f:
@@ -137,7 +143,7 @@ def update_processor_pixels(processor, data_args):
     return processor
 
 
-def _build_messages(item: Dict[str, Any], base_path: Path) -> List[Dict[str, Any]]:
+def _build_messages(item: Dict[str, Any], base_path: Path, images_in_zip: bool=False) -> List[Dict[str, Any]]:
     # Extract and normalize images and videos
     images = item.get("image") or []
     if isinstance(images, str):
@@ -149,8 +155,9 @@ def _build_messages(item: Dict[str, Any], base_path: Path) -> List[Dict[str, Any
 
     # Build media pools with absolute paths
     image_pool = [
-        {"type": "image", "image": _make_abs_paths(base_path, img)} for img in images
+        {"type": "image", "image": img if images_in_zip else _make_abs_paths(base_path, img)} for img in images
     ]
+    # NOTE: don't support video in zip for now
     video_pool = [
         {"type": "video", "video": _make_abs_paths(base_path, vid)} for vid in videos
     ]
@@ -199,17 +206,46 @@ def _build_messages(item: Dict[str, Any], base_path: Path) -> List[Dict[str, Any
     return messages
 
 
+def load_image_obj_in_messages(messages: List[Dict[str, Any]], images_zip_f: ZipFile):
+    for message in messages:
+        for content_item in message['content']:
+            if content_item['type'] == 'image':
+                image_path = content_item.get('image', None) or content_item.get('path', None) or content_item.get('url', None)
+                if image_path is None:
+                    raise ValueError("Image content item does not have 'image', 'path' or 'url' field")
+                
+                # Read image bytes from the zip file
+                with images_zip_f.open(image_path, 'r') as img_f:
+                    image_bytes = img_f.read()
+                    with Image.open(BytesIO(image_bytes)) as img:
+                        img.load() # Make sure PIL has read the data into memory
+                        image_obj = load_image(img)
+                content_item.pop('path', None)
+                content_item.pop('url', None)
+                content_item.pop('image', None)
+                content_item['image'] = image_obj
+
 def preprocess_qwen_visual(
     sources,
     processor,
+    images_zip_f: ZipFile = None,
 ) -> Dict:
     if len(sources) != 1:
         raise ValueError(f"Expected 1 source, got {len(sources)}")
 
     source = sources[0]
     base_path = Path(source.get("data_path", ""))
-    messages = _build_messages(source, base_path)
+    # chatml format: if "messages" in source, directly use it
+    messages = source.get("messages", None)
+    # sharegpt format: build messages from conversations
+    if messages is None:
+        messages = _build_messages(source, base_path, images_in_zip=images_zip_f is not None)
+    else:
+        messages = copy.deepcopy(messages) # avoid modifying the original messages otherwise the filled image objects will stay in memory all the time
 
+    if images_zip_f:
+        load_image_obj_in_messages(messages, images_zip_f) # in-place update
+    
     full_result = processor.apply_chat_template(
         messages, tokenize=True, return_dict=True, return_tensors="pt"
     )
@@ -224,10 +260,10 @@ def preprocess_qwen_visual(
     L = len(input_ids_flat)
     pos = 0
     while pos < L:
-        if input_ids_flat[pos] == 77091:
+        if input_ids_flat[pos] == 77091: # 'assistant' # actually there is high risk that there is such normal word inside text
             ans_start = pos + 2
             ans_end = ans_start
-            while ans_end < L and input_ids_flat[ans_end] != 151645:
+            while ans_end < L and input_ids_flat[ans_end] != 151645: # <|im_end|>
                 ans_end += 1
             if ans_end < L:
                 labels[0, ans_start : ans_end + 2] = input_ids[
@@ -240,16 +276,117 @@ def preprocess_qwen_visual(
     full_result["input_ids"] = input_ids
     return full_result
 
+def glob_files_via_path_regex(dir: str, path_regex: str) -> List[str]:
+    files = glob.glob(os.path.join(dir, '**/*'), recursive=True)
+    files = [f for f in files if os.path.isfile(f)]
+    # used for post-filtering files based on regex pattern
+    if path_regex is not None:
+        regex = re.compile(path_regex)
+        files = [f for f in files if regex.search(f)]
+    return sorted(files)
+
+# config yml file
+# All paths must use absolute paths
+# -
+#  annotations_dir: "path/to/annotations_dir"
+#  images_dir: "path/to/images_dir
+#  path_regex: ".*\.jsonl$" # assuming the annotation files and image zip files share the same relative path inside their dirs exept for extension
+#  annotation_path: "path/to/annotations.jsonl" # optional, if specified, use this single file
+#  data_path: "path/to/images.zip" # optional, if specified, use this single file
+#  sampling_rate: 1.0 # sampling rate apply to this whole dataset (annotations)
+# -
+#  <dataset 2>
+#
+# after loading, returning the standard dataset list
+# -
+#   annotation_path: "path/to/annotation_file.jsonl"
+#   data_path: "path/to/images_zip_file.zip"
+#   sampling_rate: 1.0
+# -
+#  <dataset(subset) 2>
+#
+# Note, each original dataset may be expanded to multiple subsets, e.g., original dataset has partitions
+
+def load_zipdatamix(config_yml_file: str, path_regex: str = None)-> List[Dict[str, Any]]: # return datalist
+    # load yaml
+    import yaml
+    with open(config_yml_file, "r") as f:
+        datamix_config = yaml.safe_load(f)
+    
+    if not isinstance(datamix_config, list):
+        raise ValueError("datamix_config should be a list of dataset configs")
+    
+    rank0_print(f"Found {len(datamix_config)} datasets in datamix config {config_yml_file}")
+
+    if path_regex:
+        rank0_print(f"Overriding path_regex in datamix config with: {path_regex}")
+    
+    datalist = []
+    for dataset_idx, dataset_def in enumerate(datamix_config):
+        annotation_path = dataset_def.get("annotation_path", None)
+        data_path = dataset_def.get("data_path", None)
+        sampling_rate = dataset_def.get("sampling_rate", 1.0)
+        if annotation_path is not None and data_path is not None:
+            # single file dataset
+            datalist.append(
+                {
+                    "annotation_path": annotation_path,
+                    "data_path": data_path,
+                    "sampling_rate": sampling_rate,
+                }
+            )
+        elif not (annotation_path is None and data_path is None):
+            raise ValueError("Both annotation_path and data_path should be specified for single file dataset")
+        else:
+            # directory dataset
+            annotations_dir = dataset_def["annotations_dir"]
+            images_dir = dataset_def["images_dir"]
+            if not (os.path.exists(annotations_dir) and os.path.isdir(annotations_dir)):
+                raise ValueError(f"annotations_dir {annotations_dir} does not exist")
+            if not (os.path.exists(images_dir) and os.path.isdir(images_dir)):
+                raise ValueError(f"images_dir {images_dir} does not exist")
+
+            path_regex =  path_regex or dataset_def.get("path_regex", r".*\.jsonl$")
+            annotation_file_paths = glob_files_via_path_regex(annotations_dir, path_regex)
+            if len(annotation_file_paths) == 0:
+                raise ValueError(f"No annotation files found in {annotations_dir} with path_regex {path_regex}")
+
+            for annotation_file_path in annotation_file_paths:
+                relative_path = os.path.relpath(annotation_file_path, annotations_dir)
+                image_zip_file = os.path.join(images_dir, relative_path).replace('.jsonl', '.zip')
+                datalist.append(
+                    {
+                        "annotation_path": annotation_file_path,
+                        "data_path": image_zip_file,
+                        "sampling_rate": sampling_rate,
+                    }
+                )
+            rank0_print(f"Dataset {dataset_idx}: Found {len(annotation_file_paths)} annotation / zip files from {annotations_dir}")
+
+    rank0_print(f"Total loaded datasets: {len(datalist)}")
+    return datalist
 
 class LazySupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
 
     def __init__(self, processor, data_args):
         super(LazySupervisedDataset, self).__init__()
+        if data_args.images_in_zip:
+            self.datapath_zipf_inited = False
+            self.datapath_to_zipf = {} # dict from data_path to ZipFile object
 
-        dataset = data_args.dataset_use.split(",")
-        dataset_list = data_list(dataset)
-        rank0_print(f"Loading datasets: {dataset_list}")
+        if data_args.datamix_config_yml:
+            dataset_list = load_zipdatamix(data_args.datamix_config_yml, data_args.datamix_path_regex)
+        elif data_args.annotation_path:
+            dataset_list = data_set_from_cmd(
+                data_args.annotation_path,
+                data_args.data_path,
+                data_args.sampling_rate,
+            )
+        else:
+            dataset = data_args.dataset_use.split(",")
+            dataset_list = data_list(dataset)
+        rank0_print(f"Loading {len(dataset_list)} datasets: {dataset_list}")
         self.video_max_total_pixels = getattr(
             data_args, "video_max_total_pixels", 1664 * 28 * 28
         )
@@ -276,12 +413,18 @@ class LazySupervisedDataset(Dataset):
                 annotations = json.load(open(data["annotation_path"], "r"))
             sampling_rate = data.get("sampling_rate", 1.0)
             if sampling_rate < 1.0:
+                if data_args.no_shuffle:
+                    raise ValueError("no_shuffle is set, conflict with sampling_rate < 1.0")
+                
                 annotations = random.sample(
                     annotations, int(len(annotations) * sampling_rate)
                 )
                 rank0_print(f"sampling {len(annotations)} examples from dataset {data}")
             else:
                 rank0_print(f"dataset name: {data}")
+            if data_args.images_in_zip:
+                self.datapath_to_zipf[data["data_path"]] = None # need lazy init later
+
             for ann in annotations:
                 if isinstance(ann, list):
                     for sub_ann in ann:
@@ -292,7 +435,20 @@ class LazySupervisedDataset(Dataset):
 
         rank0_print(f"Total training samples: {len(list_data_dict)}")
 
-        random.shuffle(list_data_dict)  # Randomly shuffle the data for training
+        if not data_args.no_shuffle:
+            random.shuffle(list_data_dict)  # Randomly shuffle the data for training
+        if data_args.train_set_size is not None and data_args.train_set_size > 0:
+            if data_args.train_set_size < len(list_data_dict):
+                rank0_print(f"train_set_size {data_args.train_set_size} is less than available samples {len(list_data_dict)}. Keep {data_args.train_set_size} samples.")
+                list_data_dict = list_data_dict[: data_args.train_set_size]
+            elif data_args.train_set_size > len(list_data_dict):
+                rank0_print(f"Warning: train_set_size {data_args.train_set_size} is larger than available samples {len(list_data_dict)}. Will repeat samples to fulfill the requirement.")
+                list_data_dict_cycle = itertools.cycle(list_data_dict)
+                list_data_dict = [next(list_data_dict_cycle) for _ in range(data_args.train_set_size)]
+                if not data_args.no_shuffle:
+                    random.shuffle(list_data_dict)
+            
+            rank0_print(f"After enforcing train_set_size, total training samples: {len(list_data_dict)}")
 
         rank0_print("Formatting inputs...Skip in lazy mode")
         processor = update_processor_pixels(processor, data_args)
@@ -340,12 +496,32 @@ class LazySupervisedDataset(Dataset):
             length_list = [sample["num_tokens"] for sample in self.list_data_dict]
             return np.array(length_list)
         else:
-            print("No pre-calculated length available.")
+            rank0_print("No pre-calculated length available.")
             return np.array([1] * len(self.list_data_dict))
 
+    def lazy_init_zipfiles(self):
+        if not self.datapath_zipf_inited:
+            for datapath in self.datapath_to_zipf:
+                zipf_path = Path(datapath)
+                # print(f"lazy_init_zipfiles: opening zip file: {zipf_path}")
+                self.datapath_to_zipf[datapath] = ZipFile(zipf_path, 'r')
+            self.datapath_zipf_inited = True
+    
+    def __del__(self):
+        if hasattr(self, 'datapath_to_zipf') and self.datapath_to_zipf is not None:
+            for datapath, zipf in self.datapath_to_zipf.items():
+                if zipf is not None:
+                    rank0_print(f"Closing zip file: {datapath}")
+                    zipf.close()
+
+            self.datapath_to_zipf = None
+
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        if self.datapath_to_zipf is not None:
+            self.lazy_init_zipfiles()
+        
         num_base_retries = 3
-        num_final_retries = 30
+        # num_final_retries = 30
 
         # try the current sample first
         for attempt_idx in range(num_base_retries):
@@ -357,7 +533,7 @@ class LazySupervisedDataset(Dataset):
                 return sample
             except Exception as e:
                 # sleep 1s in case it is a cloud disk issue
-                print(f"[Try #{attempt_idx}] Failed to fetch sample {i}. Exception:", e)
+                rank0_print(f"[Try #{attempt_idx}] Failed to fetch sample {i}. Exception:", e)
                 time.sleep(1)
 
         # try other samples, in case it is file corruption issue
@@ -372,7 +548,7 @@ class LazySupervisedDataset(Dataset):
                 return sample
             except Exception as e:
                 # no need to sleep
-                print(
+                rank0_print(
                     f"[Try other #{attempt_idx}] Failed to fetch sample {next_index}. Exception:",
                     e,
                 )
@@ -388,9 +564,16 @@ class LazySupervisedDataset(Dataset):
             raise e
 
     def _get_item(self, sources) -> Dict[str, torch.Tensor]:
+        images_zip_f = None
+        if self.datapath_to_zipf is not None:
+            if len(sources) != 1:
+                raise ValueError(f"Expected 1 source, got {len(sources)}")
+            images_zip_f = self.datapath_to_zipf[sources[0]['data_path']]
+        
         data_dict = preprocess_qwen_visual(
             sources,
             self.processor,
+            images_zip_f=images_zip_f,
         )
 
         seq_len = data_dict["input_ids"][0].size(0)
@@ -427,16 +610,18 @@ class LazySupervisedDataset(Dataset):
         data_dict["position_ids"] = position_ids
         data_dict["attention_mask"] = [seq_len]
 
-        text = self.processor.tokenizer.decode(
-            data_dict["input_ids"][0], skip_special_tokens=False
-        )
+        # not used at all, commented it out
+        # text = self.processor.tokenizer.decode(
+        #     data_dict["input_ids"][0], skip_special_tokens=False
+        # )
 
-        labels = data_dict["labels"][0]
-        labels = [
-            tid if tid != -100 else self.processor.tokenizer.pad_token_id
-            for tid in labels
-        ]
-        label = self.processor.tokenizer.decode(labels, skip_special_tokens=False)
+        # labels = data_dict["labels"][0]
+        # labels = [
+        #     tid if tid != -100 else self.processor.tokenizer.pad_token_id
+        #     for tid in labels
+        # ]
+        # not used at all, commented it out
+        # label = self.processor.tokenizer.decode(labels, skip_special_tokens=False)
 
         return data_dict
 
