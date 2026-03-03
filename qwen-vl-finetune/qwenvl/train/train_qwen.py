@@ -38,7 +38,8 @@ from transformers import (
     Qwen2_5_VLForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
     Qwen3VLMoeForConditionalGeneration,
-    TrainerCallback
+    TrainerCallback,
+    BitsAndBytesConfig,
 )
 from qwenvl.data.data_processor import make_supervised_data_module
 from qwenvl.train.argument import (
@@ -244,6 +245,24 @@ def train(attn_implementation="flash_attention_2"):
 
     os.makedirs(training_args.output_dir, exist_ok=True)
 
+    # quantization config
+    if model_args.load_in_4bit or model_args.load_in_8bit:
+        if model_args.load_in_4bit and model_args.load_in_8bit:
+            raise ValueError("Only one of load_in_4bit and load_in_8bit can be True")
+        # only for lora
+        if not training_args.lora_enable:
+            raise ValueError("Quantization (load_in_4bit or load_in_8bit) is only supported for LoRA training (training_args.lora_enable must be True)")
+
+        quant_config = BitsAndBytesConfig(
+            load_in_8bit=model_args.load_in_8bit,
+            load_in_4bit=model_args.load_in_4bit,
+            bnb_4bit_compute_dtype=getattr(torch, model_args.bnb_4bit_compute_dtype) if model_args.bnb_4bit_compute_dtype else None,
+            bnb_4bit_use_double_quant=model_args.bnb_4bit_use_double_quant,           # Use double quantization to improve accuracy
+            bnb_4bit_quant_type=model_args.bnb_4bit_quant_type                 # Type of quantization. "nf4" is recommended for recent LLMs
+        )
+
+    model_init_kwargs = {"quantization_config": quant_config} if model_args.load_in_4bit or model_args.load_in_8bit else {}
+
     # if "qwen3" in model_args.model_name_or_path.lower() and "a" in Path(model_args.model_name_or_path.rstrip("/")).name.lower():
     if data_args.model_type == "qwen3vlmoe":
         model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
@@ -251,6 +270,7 @@ def train(attn_implementation="flash_attention_2"):
             cache_dir=training_args.cache_dir,
             attn_implementation=attn_implementation,
             dtype=(torch.bfloat16 if training_args.bf16 else None),
+            **model_init_kwargs,
         )
         data_args.model_type = "qwen3vl"
     # elif "qwen3" in model_args.model_name_or_path.lower():
@@ -260,6 +280,7 @@ def train(attn_implementation="flash_attention_2"):
             cache_dir=training_args.cache_dir,
             attn_implementation=attn_implementation,
             dtype=(torch.bfloat16 if training_args.bf16 else None),
+            **model_init_kwargs,
         )
         data_args.model_type = "qwen3vl"
     # elif "qwen2.5" in model_args.model_name_or_path.lower():
@@ -269,6 +290,7 @@ def train(attn_implementation="flash_attention_2"):
             cache_dir=training_args.cache_dir,
             attn_implementation=attn_implementation,
             dtype=(torch.bfloat16 if training_args.bf16 else None),
+            **model_init_kwargs,
         )
         data_args.model_type = "qwen2.5vl"
     # else:
@@ -278,6 +300,7 @@ def train(attn_implementation="flash_attention_2"):
             cache_dir=training_args.cache_dir,
             attn_implementation=attn_implementation,
             dtype=(torch.bfloat16 if training_args.bf16 else None),
+            **model_init_kwargs,
         )
         data_args.model_type = "qwen2vl"
     else:
