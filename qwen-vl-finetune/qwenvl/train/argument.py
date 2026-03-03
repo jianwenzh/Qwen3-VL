@@ -9,6 +9,11 @@ class ModelArguments:
     tune_mm_llm: bool = field(default=False)
     tune_mm_mlp: bool = field(default=False)
     tune_mm_vision: bool = field(default=False)
+    load_in_4bit: bool = field(default=False)
+    load_in_8bit: bool = field(default=False)
+    bnb_4bit_compute_dtype: str = field(default="bfloat16")
+    bnb_4bit_use_double_quant: bool = field(default=True)
+    bnb_4bit_quant_type: str = field(default="nf4")
 
 @dataclass
 class DataArguments:
